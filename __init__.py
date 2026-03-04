@@ -34,7 +34,7 @@ class LoadVideoFromPath:
         return {
             "required": {
                 # 这里用 STRING，ComfyUI 会允许接其它节点的 STRING 输出
-                "video_path": ("STRING", {"default": ""}),
+                "video_path": ("*", {"default": ""}),
                 "max_frames": ("INT", {"default": 0, "min": 0, "max": 100000}),
                 "skip_first_frames": ("INT", {"default": 0, "min": 0, "max": 100000}),
                 "select_every_nth": ("INT", {"default": 1, "min": 1, "max": 1000}),
@@ -105,4 +105,5 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LoadVideoFromPath": "Load Video From Path (Connectable)"
+
 }
