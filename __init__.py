@@ -63,22 +63,24 @@ def _ensure_path(x: Any) -> str:
       - str that looks like a python list: "['a.png','b.mp4','c-audio.mp4']"
       - list/tuple: ["a.png","b.mp4","c-audio.mp4"]
       - dict: {"filenames":[...]} / {"filename":...} / {"path":...}
-      - other: str(x)
+      - custom objects: will be stringified and then parsed if list-like
     """
-    # 1) string: maybe already a path, or a list-like string
-    if isinstance(x, str):
-        s = x.strip()
 
-        # Try parse list-like string
+    def _parse_list_string(s: str) -> Optional[str]:
+        s = s.strip()
         if (s.startswith("[") and s.endswith("]")) or (s.startswith("(") and s.endswith(")")):
             try:
                 parsed = ast.literal_eval(s)
                 if isinstance(parsed, (list, tuple)) and len(parsed) > 0:
                     return _choose_best_path(parsed)
             except Exception:
-                pass
+                return None
+        return None
 
-        return s
+    # 1) string: maybe already a path, or a list-like string
+    if isinstance(x, str):
+        parsed = _parse_list_string(x)
+        return parsed if parsed is not None else x.strip()
 
     # 2) list/tuple
     if isinstance(x, (list, tuple)):
@@ -93,11 +95,16 @@ def _ensure_path(x: Any) -> str:
                 v = x[k]
                 if isinstance(v, (list, tuple)) and len(v) > 0:
                     return _choose_best_path(v)
+                # v might still be a list-like string
+                if isinstance(v, str):
+                    parsed = _parse_list_string(v)
+                    return parsed if parsed is not None else v.strip()
                 return str(v)
 
-    # 4) fallback
-    return str(x)
-
+    # 4) custom objects: stringify -> parse if list-like -> else return string
+    s = str(x).strip()
+    parsed = _parse_list_string(s)
+    return parsed if parsed is not None else s
 
 def _resolve_output_path(path: str) -> str:
     """
@@ -240,3 +247,4 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LoadVideoFromPath": "Load Video From Path (Connectable)"
 }
+
