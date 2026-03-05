@@ -1,15 +1,22 @@
 import os
+import ast
+from typing import Any, List, Optional, Sequence
+
 import cv2
 import numpy as np
 import torch
-import ast
 
-# ---------- helpers ----------
+
+# -------------------------
+# Helpers
+# -------------------------
 def _pick_first_nonempty(*vals):
+    """
+    Pick the first value that is not None and not empty.
+    """
     for v in vals:
         if v is None:
             continue
-        # 有些 socket 会传空字符串/空列表
         if isinstance(v, str) and v.strip() == "":
             continue
         if isinstance(v, (list, tuple)) and len(v) == 0:
@@ -17,105 +24,139 @@ def _pick_first_nonempty(*vals):
         return v
     return None
 
-def _choose_best_path(paths):
-    # 优先：普通 mp4（非 audio）
-    mp4s = [p for p in paths if isinstance(p, str) and p.lower().endswith(".mp4") and "-audio" not in p.lower()]
+
+def _choose_best_path(paths: Sequence[Any]) -> str:
+    """
+    Given a list/tuple of candidate paths, choose the best video file path.
+
+    Priority:
+      1) .mp4 without '-audio' suffix
+      2) other common video formats
+      3) fallback: last entry stringified
+    """
+    # Normalize to str list
+    s_paths = [p for p in paths if isinstance(p, str) and p.strip()]
+
+    # 1) Prefer normal mp4 (not -audio)
+    mp4s = [p for p in s_paths if p.lower().endswith(".mp4") and "-audio" not in p.lower()]
     if mp4s:
         return mp4s[-1]
 
-    # 次选：任意视频
-    vids = [p for p in paths if isinstance(p, str) and os.path.splitext(p.lower())[1] in (".mp4", ".mov", ".mkv", ".webm", ".avi")]
+    # 2) Other common video formats
+    exts = (".mp4", ".mov", ".mkv", ".webm", ".avi")
+    vids = [p for p in s_paths if p.lower().endswith(exts)]
     if vids:
         return vids[-1]
 
-    # 兜底：最后一个
-    return str(paths[-1]) if paths else ""
+    # 3) Fallback: last item
+    if s_paths:
+        return s_paths[-1]
+    return str(paths[-1]) if len(paths) > 0 else ""
 
-def _ensure_path(x) -> str:
-    # 1) x 是字符串：可能是正常路径，也可能是 "['a','b']" 这种列表字符串
+
+def _ensure_path(x: Any) -> str:
+    """
+    Make sure we resolve input into a single file path string.
+
+    Handles:
+      - str path: "/a/b.mp4"
+      - str that looks like a python list: "['a.png','b.mp4','c-audio.mp4']"
+      - list/tuple: ["a.png","b.mp4","c-audio.mp4"]
+      - dict: {"filenames":[...]} / {"filename":...} / {"path":...}
+      - other: str(x)
+    """
+    # 1) string: maybe already a path, or a list-like string
     if isinstance(x, str):
         s = x.strip()
-        # 尝试把“列表字符串”解析成真正 list
+
+        # Try parse list-like string
         if (s.startswith("[") and s.endswith("]")) or (s.startswith("(") and s.endswith(")")):
             try:
                 parsed = ast.literal_eval(s)
                 if isinstance(parsed, (list, tuple)) and len(parsed) > 0:
-                    return _choose_best_path(list(parsed))
+                    return _choose_best_path(parsed)
             except Exception:
                 pass
+
         return s
 
-    # 2) list/tuple：选最合适的那个
+    # 2) list/tuple
     if isinstance(x, (list, tuple)):
         if len(x) == 0:
             raise ValueError("Empty filenames list.")
-        return _choose_best_path(list(x))
+        return _choose_best_path(x)
 
-    # 3) dict：尝试常见字段
+    # 3) dict
     if isinstance(x, dict):
         for k in ("filenames", "filename", "path", "paths"):
             if k in x:
                 v = x[k]
                 if isinstance(v, (list, tuple)) and len(v) > 0:
-                    return _choose_best_path(list(v))
+                    return _choose_best_path(v)
                 return str(v)
 
+    # 4) fallback
     return str(x)
 
 
 def _resolve_output_path(path: str) -> str:
     """
-    If upstream returns a path relative to ComfyUI output/,
-    try to resolve it automatically.
+    Resolve path when upstream returns a relative path to ComfyUI output/.
+
+    - If path exists as-is, return it.
+    - Else try: <ComfyUI root>/output/<path>
     """
     path = path.strip()
     if os.path.exists(path):
         return path
 
-    # 常见：VHS 只给 "wan2.2/animate/xxx.mp4" 这种相对 output 的路径
-    # 这里按 ComfyUI 典型结构：<ComfyUI>/output/<relative>
-    # __file__ = <ComfyUI>/custom_nodes/<this_repo>/__init__.py
+    # __file__ = <ComfyUI>/custom_nodes/<repo>/__init__.py
     comfy_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     candidate = os.path.join(comfy_root, "output", path)
     if os.path.exists(candidate):
         return candidate
 
-    return path  # let caller raise FileNotFoundError with original info
+    return path
+
 
 def _bgr_to_rgb_float01(frame_bgr: np.ndarray) -> np.ndarray:
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     return rgb.astype(np.float32) / 255.0
 
-def _to_comfy_image_batch(frames_rgb01):
-    arr = np.stack(frames_rgb01, axis=0)  # [B,H,W,C]
+
+def _to_comfy_image_batch(frames_rgb01: List[np.ndarray]) -> torch.Tensor:
+    # ComfyUI IMAGE format: [B, H, W, C], float32 0..1
+    arr = np.stack(frames_rgb01, axis=0)
     return torch.from_numpy(arr)
 
 
-# ---------- node ----------
+# -------------------------
+# Node
+# -------------------------
 class LoadVideoFromPath:
     """
     Load video frames from a connectable path-like input.
 
-    You can connect:
-      - VHS Video Combine -> Filenames (often VHS_FILENAMES / FILENAMES)
-      - or manually provide a STRING path
+    Designed to work with:
+      - VHS Video Combine -> Filenames output (often VHS_FILENAMES / FILENAMES)
+      - or manual STRING path input (video_path_text)
     """
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                # 手动输入兜底：你不接线也能用
+                # Manual fallback if you don't connect any filenames socket
                 "video_path_text": ("STRING", {"default": ""}),
                 "max_frames": ("INT", {"default": 0, "min": 0, "max": 100000}),
                 "skip_first_frames": ("INT", {"default": 0, "min": 0, "max": 100000}),
                 "select_every_nth": ("INT", {"default": 1, "min": 1, "max": 1000}),
             },
             "optional": {
-                # 尽量覆盖 VHS/其它视频节点常见的 filenames socket 类型
+                # Try to cover VHS socket types.
                 "filenames_vhs": ("VHS_FILENAMES",),
                 "filenames": ("FILENAMES",),
-                # 再给一个 ANY 兜底（部分环境 * 可用，部分不可用）
+                # wildcard fallback; may or may not connect in some setups
                 "filenames_any": ("*",),
             },
         }
@@ -125,14 +166,28 @@ class LoadVideoFromPath:
     FUNCTION = "load"
     CATEGORY = "video"
 
-    def load(self, video_path_text, max_frames, skip_first_frames, select_every_nth,
-             filenames_vhs=None, filenames=None, filenames_any=None):
-
+    def load(
+        self,
+        video_path_text: str,
+        max_frames: int,
+        skip_first_frames: int,
+        select_every_nth: int,
+        filenames_vhs: Optional[Any] = None,
+        filenames: Optional[Any] = None,
+        filenames_any: Optional[Any] = None,
+    ):
+        # Pick the best upstream value, fallback to manual text path
         src = _pick_first_nonempty(filenames_vhs, filenames, filenames_any, video_path_text)
         if src is None:
             raise ValueError("No input provided: connect Filenames socket or fill video_path_text.")
 
+        # Resolve to a single string path
         path = _ensure_path(src)
+
+        # Extra safety: if something still isn't a string, coerce again
+        if isinstance(path, (list, tuple, dict)):
+            path = _ensure_path(path)
+
         path = _resolve_output_path(path)
 
         if not os.path.exists(path):
@@ -175,7 +230,9 @@ class LoadVideoFromPath:
         return (images, float(fps), int(images.shape[0]), path)
 
 
-# ---------- registration ----------
+# -------------------------
+# Registration
+# -------------------------
 NODE_CLASS_MAPPINGS = {
     "LoadVideoFromPath": LoadVideoFromPath
 }
@@ -183,4 +240,3 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LoadVideoFromPath": "Load Video From Path (Connectable)"
 }
-
