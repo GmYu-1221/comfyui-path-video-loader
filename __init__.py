@@ -2,6 +2,7 @@ import os
 import cv2
 import numpy as np
 import torch
+import ast
 
 # ---------- helpers ----------
 def _pick_first_nonempty(*vals):
@@ -16,26 +17,51 @@ def _pick_first_nonempty(*vals):
         return v
     return None
 
+def _choose_best_path(paths):
+    # 优先：普通 mp4（非 audio）
+    mp4s = [p for p in paths if isinstance(p, str) and p.lower().endswith(".mp4") and "-audio" not in p.lower()]
+    if mp4s:
+        return mp4s[-1]
+
+    # 次选：任意视频
+    vids = [p for p in paths if isinstance(p, str) and os.path.splitext(p.lower())[1] in (".mp4", ".mov", ".mkv", ".webm", ".avi")]
+    if vids:
+        return vids[-1]
+
+    # 兜底：最后一个
+    return str(paths[-1]) if paths else ""
+
 def _ensure_path(x) -> str:
-    # 1) str
+    # 1) x 是字符串：可能是正常路径，也可能是 "['a','b']" 这种列表字符串
     if isinstance(x, str):
-        return x
+        s = x.strip()
+        # 尝试把“列表字符串”解析成真正 list
+        if (s.startswith("[") and s.endswith("]")) or (s.startswith("(") and s.endswith(")")):
+            try:
+                parsed = ast.literal_eval(s)
+                if isinstance(parsed, (list, tuple)) and len(parsed) > 0:
+                    return _choose_best_path(list(parsed))
+            except Exception:
+                pass
+        return s
 
-    # 2) list/tuple -> last
+    # 2) list/tuple：选最合适的那个
     if isinstance(x, (list, tuple)):
-        return str(x[-1])
+        if len(x) == 0:
+            raise ValueError("Empty filenames list.")
+        return _choose_best_path(list(x))
 
-    # 3) dict -> try common keys
+    # 3) dict：尝试常见字段
     if isinstance(x, dict):
         for k in ("filenames", "filename", "path", "paths"):
             if k in x:
                 v = x[k]
                 if isinstance(v, (list, tuple)) and len(v) > 0:
-                    return str(v[-1])
+                    return _choose_best_path(list(v))
                 return str(v)
 
-    # 4) fallback
     return str(x)
+
 
 def _resolve_output_path(path: str) -> str:
     """
@@ -157,3 +183,4 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LoadVideoFromPath": "Load Video From Path (Connectable)"
 }
+
